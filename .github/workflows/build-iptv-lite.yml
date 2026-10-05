@@ -1,0 +1,38 @@
+name: build-iptv-lite-arm64
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - Containerfile.iptv-lite
+      - support/container-entrypoint-lite.sh
+      - patches/**
+      - .github/workflows/build-iptv-lite.yml
+
+jobs:
+  build:
+    # Native arm64 runner (free for public repos). For a private repo or a missing runner,
+    # switch to ubuntu-latest and add docker/setup-qemu-action before buildx (build will be much slower).
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build docker-archive tar
+        run: |
+          docker buildx build --platform linux/arm64 -f Containerfile.iptv-lite \
+            --output type=docker,dest=tvhead_arm64_lite.tar \
+            -t tvheadend-iptv-lite:latest .
+          sha256sum tvhead_arm64_lite.tar | tee tvhead_arm64_lite.tar.sha256
+          ls -l tvhead_arm64_lite.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tvhead_arm64_lite
+          path: |
+            tvhead_arm64_lite.tar
+            tvhead_arm64_lite.tar.sha256
+          compression-level: 0
