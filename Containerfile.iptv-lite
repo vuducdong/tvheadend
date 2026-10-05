@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Tvheadend "IPTV-lite" image for MikroTik RouterOS containers (arm64, RB5009).
+# Input sources kept: IPTV over UDP/multicast, RTP, HTTP(S) (+ RTSP, shipped with the IPTV module).
+# Removed at build time: linuxdvb (DVB-S/S2/C/C2/T/T2, ATSC), SAT>IP client/server,
+# HDHomeRun, tsfile, pipe://, file://, CA clients (cwc/cccam/capmt/constcw),
+# dvb-scan tables, timeshift, libav (transcoding), avahi, dbus.
+#
+# Build context: repository root of vuducdong/tvheadend (master).
+#   docker buildx build --platform linux/arm64 -f Containerfile.iptv-lite \
+#       --output type=docker,dest=tvhead_arm64_lite.tar -t tvheadend-iptv-lite:latest .
+
+ARG ALPINE_VERSION="3.22"
+
+FROM alpine:${ALPINE_VERSION} AS builder
+
+WORKDIR /src
+COPY . /src/
+
+ENV VUE_FILE_CACHE="/src/.vuecache"
+
+RUN apk add --no-cache \
+        bash \
+        bsd-compat-headers \
+        build-base \
+        coreutils \
+        findutils \
+        gettext-dev \
+        git \
+        gnu-libiconv-dev \
+        linux-headers \
+        musl-dev \
+        openssl-dev \
+        patch \
+        pcre2-dev \
+        py3-requests \
+        python3 \
+        uriparser-dev \
+        wget \
+        zlib-dev
+
+# Drop the pipe:// and file:// IPTV handlers (arbitrary command execution / local file read).
+RUN set -eux; \
+    for p in /src/patches/*.patch; do patch -p1 --verbose < "$p"; done; \
+    rm -f src/input/mpegts/iptv/iptv_pipe.c src/input/mpegts/iptv/iptv_file.c; \
+    if grep -rn "iptv_pipe_init\|iptv_file_init" src Makefile; then echo "pipe/file patch incomplete" >&2; exit 1; fi
+
+RUN set -eux; \
+    git config --global --add safe.directory '/src' || true; \
+    ./configure \
+        --prefix=/usr/local \
+        --python=python3 \
+        --disable-doc \
+        --disable-execinfo \
+        --disable-ccache \
+        --enable-bundle \
+        --enable-vue_cache \
+        --disable-vue_build \
+        --enable-kqueue \
+        --disable-linuxdvb \
+        --disable-ddci \
+        --disable-satip_server \
+        --disable-satip_client \
+        --disable-hdhomerun_client \
+        --disable-hdhomerun_server \
+        --disable-hdhomerun_static \
+        --disable-tsfile \
+        --disable-cwc \
+        --disable-cccam \
+        --disable-capmt \
+        --disable-constcw \
+        --disable-dvbscan \
+        --disable-timeshift \
+        --disable-avahi \
+        --disable-dbus_1 \
+        --disable-vaapi \
+        --disable-libav \
+        --disable-ffmpeg_static \
+        --disable-libx264_static \
+        --disable-libx265_static \
+        --disable-libvpx_static \
+        --disable-libtheora_static \
+        --disable-libvorbis_static \
+        --disable-libfdkaac_static \
+        --disable-libopus_static; \
+    make -j"$(nproc)" DESTDIR=/tvheadend install; \
+    strip /tvheadend/usr/local/bin/tvheadend; \
+    rm -rf /tvheadend/usr/local/share/man
+
+FROM alpine:${ALPINE_VERSION} AS runner
+
+LABEL org.opencontainers.image.title="tvheadend-iptv-lite" \
+      org.opencontainers.image.description="Tvheadend with IPTV (UDP/RTP/HTTP) inputs only" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
+
+RUN apk add --no-cache \
+        ca-certificates-bundle \
+        gnu-libiconv-libs \
+        libcrypto3 \
+        libssl3 \
+        liburiparser \
+        pcre2 \
+        tini \
+        tzdata \
+        zlib
+
+COPY --from=builder /tvheadend/ /
+COPY support/container-entrypoint-lite.sh /init
+RUN chmod 0755 /init && install -d -m 0755 /config
+
+# 9981 = web UI/HTTP, 9982 = HTSP
+EXPOSE 9981 9982
+VOLUME /config
+WORKDIR /config
+
+# Runs as root on purpose: RouterOS USB/disk mounts are owned by root.
+ENTRYPOINT ["/sbin/tini", "--", "/init"]
